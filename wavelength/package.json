@@ -1,0 +1,16 @@
+{
+  "name": "wavelength",
+  "version": "1.0.0",
+  "description": "Drop files into a 4-digit room. Anyone with the code sees them land in real time.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.7.5"
+  }
+}
