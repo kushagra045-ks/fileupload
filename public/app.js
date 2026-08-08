@@ -1,6 +1,7 @@
 (function () {
   "use strict";
 
+  const API_BASE = (window.API_BASE || '').replace(/\/$/, '');
   const app = document.getElementById('app');
   const toastEl = document.getElementById('toast');
   let toastTimer = null;
@@ -229,7 +230,7 @@
   }
 
   function connectSocket(code) {
-    socket = io({ transports: ['websocket', 'polling'] });
+    socket = io(API_BASE || undefined, { transports: ['websocket', 'polling'] });
     socket.on('connect', () => {
       setSignal(true);
       socket.emit('join-room', code);
@@ -255,7 +256,7 @@
 
   async function loadFiles() {
     try {
-      const res = await fetch('/api/rooms/' + roomState.code + '/files');
+      const res = await fetch(API_BASE + '/api/rooms/' + roomState.code + '/files');
       const data = await res.json();
       roomState.files = data.files || [];
       renderFileList();
@@ -299,7 +300,7 @@
           <div class="file-meta">${fmtSize(f.size)} &middot; ${fmtTime(f.uploadedAt)}</div>
         </div>
         <div class="file-actions">
-          <a class="file-dl" href="/api/rooms/${roomState.code}/files/${f.id}/download" title="Download">
+          <a class="file-dl" href="${API_BASE}/api/rooms/${roomState.code}/files/${f.id}/download" title="Download">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 4v12 M6 11l6 6 6-6 M5 20h14"/>
             </svg>
@@ -322,7 +323,7 @@
 
   async function removeFile(id) {
     try {
-      const res = await fetch('/api/rooms/' + roomState.code + '/files/' + id, { method: 'DELETE' });
+      const res = await fetch(API_BASE + '/api/rooms/' + roomState.code + '/files/' + id, { method: 'DELETE' });
       if (!res.ok) throw new Error('failed');
       roomState.files = roomState.files.filter(f => f.id !== id);
       renderFileList();
@@ -343,7 +344,7 @@
     renderFileList();
 
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/rooms/' + roomState.code + '/upload');
+    xhr.open('POST', API_BASE + '/api/rooms/' + roomState.code + '/upload');
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;
       const pct = Math.round((e.loaded / e.total) * 100);

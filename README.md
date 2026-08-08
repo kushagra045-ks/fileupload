@@ -53,6 +53,50 @@ Files are named by a random UUID on disk (not the original filename) to avoid
 collisions and path traversal issues; the original filename is preserved in
 the metadata and used again on download.
 
+## Hosting split across Cloudflare Pages + a separate backend
+
+Cloudflare Pages (and GitHub Pages) only serve static files — they can't run
+`server.js`. If you want to keep the frontend on Cloudflare Pages, the
+backend has to run somewhere else that hosts a persistent Node process
+(Render, Railway, Fly.io, a VPS). Two pieces, two URLs, wired together with
+CORS. Steps:
+
+1. **Deploy the backend.** Push this whole repo to Render/Railway/Fly.io.
+   Set the start command to `npm start`. Note the URL it gives you, e.g.
+   `https://wavelength-backend.onrender.com`. If that platform has an
+   ephemeral filesystem, attach a persistent disk/volume mounted at
+   `uploads/` and `data/` (see the ephemeral-filesystem note further down) —
+   otherwise every uploaded file disappears on the next deploy or restart.
+
+2. **Lock down CORS.** On the backend host, set an environment variable:
+   ```
+   ALLOWED_ORIGIN=https://your-project.pages.dev
+   ```
+   (comma-separate multiple origins if you have a custom domain too, e.g.
+   `https://your-project.pages.dev,https://files.yourdomain.com`). Without
+   this it defaults to `*`, which works but allows any website to call your
+   API.
+
+3. **Point the frontend at the backend.** Edit `public/config.js`:
+   ```js
+   window.API_BASE = "https://wavelength-backend.onrender.com";
+   ```
+   Commit and push. Cloudflare Pages will redeploy the static site
+   automatically if it's connected to your GitHub repo.
+
+4. **Set the Pages build settings** (if you haven't already) so it only
+   serves the `public/` folder: in the Cloudflare Pages project settings,
+   set **Build output directory** to `public`, and leave the build command
+   empty since there's nothing to build.
+
+That's it — the static site on Pages now talks cross-origin to the Node
+backend for uploads, downloads, and the live Socket.io connection. If
+uploads still fail after this, open your browser's dev tools → Network tab
+and check the failing request: a CORS error in the console means
+`ALLOWED_ORIGIN` doesn't match your Pages URL exactly (check for a trailing
+slash or `www.` mismatch); a `502`/timeout usually means the backend itself
+isn't running or crashed — check its logs on Render/Railway/Fly.
+
 ## Hosting it yourself
 
 Any place that runs a persistent Node process works: a VPS, Render, Railway,

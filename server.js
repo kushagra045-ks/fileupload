@@ -4,12 +4,30 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
+const cors = require('cors');
 const { Server } = require('socket.io');
 
 // ---------- config ----------
 const PORT = process.env.PORT || 3000;
 const MAX_FILE_MB = Number(process.env.MAX_FILE_MB || 100);
 const ROOM_TTL_HOURS = Number(process.env.ROOM_TTL_HOURS || 0); // 0 = never expire
+
+// Comma-separated list of origins allowed to call this API, e.g.
+// "https://wavelength.pages.dev,https://files.yourdomain.com"
+// Defaults to "*" (anyone) which is fine to start with but worth locking
+// down once you know your Pages URL.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || '*')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function corsOriginCheck(origin, callback) {
+  if (ALLOWED_ORIGINS.includes('*') || !origin || ALLOWED_ORIGINS.includes(origin)) {
+    callback(null, true);
+  } else {
+    callback(new Error('Not allowed by CORS: ' + origin));
+  }
+}
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
@@ -60,8 +78,9 @@ if (ROOM_TTL_HOURS) setInterval(cleanupExpired, 30 * 60 * 1000);
 // ---------- app / server / sockets ----------
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, { cors: { origin: corsOriginCheck } });
 
+app.use(cors({ origin: corsOriginCheck }));
 app.use(express.static(path.join(ROOT, 'public')));
 
 // ---------- upload handling ----------
