@@ -1,195 +1,87 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
-const cors = require('cors');
 const { Server } = require('socket.io');
-const {
-  S3Client,
-  GetObjectCommand,
-  PutObjectCommand,
-  DeleteObjectCommand,
-  ListObjectsV2Command,
-  HeadBucketCommand
-} = require('@aws-sdk/client-s3');
-const { Upload } = require('@aws-sdk/lib-storage');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 // ---------- config ----------
 const PORT = process.env.PORT || 3000;
-// 2048 MB = 2GB default. Raise via env if you need bigger. Note this is
-// enforced by this app, not by R2 — R2 itself has no meaningful size cap
-// for objects uploaded this way.
-const MAX_FILE_MB = Number(process.env.MAX_FILE_MB || 2048);
-// Files older than this many hours are deleted automatically. Minimum
-// sensible value is 1; set to 0 only if you really want files to live
-// forever (not recommended once this is public — see the abuse notes in
-// the README).
-const FILE_TTL_HOURS = Number(process.env.FILE_TTL_HOURS || 1);
+const MAX_FILE_MB = Number(process.env.MAX_FILE_MB || 100);
+const ROOM_TTL_HOURS = Number(process.env.ROOM_TTL_HOURS || 0); // 0 = never expire
 
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || '*')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+const ROOT = __dirname;
+const DATA_DIR = path.join(ROOT, 'data');
+const UPLOAD_DIR = path.join(ROOT, 'uploads');
+const DB_FILE = path.join(DATA_DIR, 'rooms.json');
 
-function corsOriginCheck(origin, callback) {
-  if (ALLOWED_ORIGINS.includes('*') || !origin || ALLOWED_ORIGINS.includes(origin)) {
-    callback(null, true);
-  } else {
-    callback(new Error('Not allowed by CORS: ' + origin));
+fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// ---------- tiny json "database" ----------
+// shape: { "1234": [ { id, name, size, type, storedName, uploadedAt } ] }
+function loadDB() {
+  try {
+    return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+  } catch (e) {
+    return {};
   }
 }
-
-// ---------- R2 / S3-compatible storage ----------
-const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
-const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
-const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
-const R2_BUCKET = process.env.R2_BUCKET_NAME;
-
-for (const [name, val] of Object.entries({ R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET })) {
-  if (!val) {
-    console.error(`Missing required env var for R2 storage: ${name}. See README for setup.`);
-    process.exit(1);
-  }
+function saveDB() {
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
-
-const s3 = new S3Client({
-  region: 'auto',
-  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY
-  }
-});
+let db = loadDB();
 
 function isValidCode(code) {
   return /^\d{4}$/.test(code);
 }
 
-function isExpired(meta) {
-  if (!FILE_TTL_HOURS) return false;
-  return Date.now() - meta.uploadedAt >= FILE_TTL_HOURS * 3600 * 1000;
-}
-
-function metaKey(code) {
-  return `meta/${code}.json`;
-}
-
-async function streamToString(stream) {
-  const chunks = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-// ---------- per-room metadata, stored as a small JSON object in R2 ----------
-async function getRoomMeta(code) {
-  try {
-    const res = await s3.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: metaKey(code) }));
-    const text = await streamToString(res.Body);
-    return JSON.parse(text);
-  } catch (e) {
-    if (e.name === 'NoSuchKey' || e.$metadata?.httpStatusCode === 404) return [];
-    throw e;
+// ---------- optional cleanup of old rooms ----------
+function cleanupExpired() {
+  if (!ROOM_TTL_HOURS) return;
+  const cutoff = Date.now() - ROOM_TTL_HOURS * 3600 * 1000;
+  let changed = false;
+  for (const code of Object.keys(db)) {
+    const kept = db[code].filter(f => f.uploadedAt >= cutoff);
+    const removed = db[code].filter(f => f.uploadedAt < cutoff);
+    for (const f of removed) {
+      const p = path.join(UPLOAD_DIR, code, f.storedName);
+      fs.unlink(p, () => {});
+    }
+    if (removed.length) changed = true;
+    if (kept.length) db[code] = kept;
+    else delete db[code];
   }
+  if (changed) saveDB();
 }
-async function saveRoomMeta(code, list) {
-  await s3.send(new PutObjectCommand({
-    Bucket: R2_BUCKET,
-    Key: metaKey(code),
-    Body: JSON.stringify(list),
-    ContentType: 'application/json'
-  }));
-}
-
-function contentDisposition(name) {
-  const fallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'");
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
-}
-
-// ---------- automatic expiry sweep ----------
-async function cleanupExpired() {
-  if (!FILE_TTL_HOURS) return;
-  try {
-    let token;
-    do {
-      const page = await s3.send(new ListObjectsV2Command({
-        Bucket: R2_BUCKET, Prefix: 'meta/', ContinuationToken: token
-      }));
-      for (const obj of page.Contents || []) {
-        const code = obj.Key.slice('meta/'.length, -'.json'.length);
-        try {
-          const list = await getRoomMeta(code);
-          const removed = list.filter(isExpired);
-          if (!removed.length) continue;
-          const kept = list.filter(f => !isExpired(f));
-          if (kept.length) await saveRoomMeta(code, kept);
-          else await s3.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: obj.Key }));
-          for (const f of removed) {
-            await s3.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: f.r2Key })).catch(() => {});
-            io.to(code).emit('file-removed', { id: f.id, reason: 'expired' });
-          }
-        } catch (e) {
-          console.error('cleanup failed for room', code, e.message);
-        }
-      }
-      token = page.IsTruncated ? page.NextContinuationToken : undefined;
-    } while (token);
-  } catch (e) {
-    console.error('cleanup sweep failed:', e.message);
-  }
-}
-// Checked every 2 minutes so a 1-hour TTL is enforced fairly tightly.
-if (FILE_TTL_HOURS) setInterval(cleanupExpired, 2 * 60 * 1000);
+if (ROOM_TTL_HOURS) setInterval(cleanupExpired, 30 * 60 * 1000);
 
 // ---------- app / server / sockets ----------
 const app = express();
 const server = http.createServer(app);
-// Node kills requests after 5 minutes by default. A 2GB upload on a slow
-// connection can take longer than that, so this is disabled. If you later
-// put this behind a reverse proxy, that layer may have its own timeout.
-server.requestTimeout = 0;
-server.headersTimeout = 0;
-const io = new Server(server, { cors: { origin: corsOriginCheck } });
+const io = new Server(server, { cors: { origin: '*' } });
 
-app.use(cors({ origin: corsOriginCheck }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(ROOT, 'public')));
 
-// ---------- upload handling: streams straight into R2, never touches disk ----------
-class R2Storage {
-  _handleFile(req, file, cb) {
+// ---------- upload handling ----------
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
     const code = req.params.code;
+    const dir = path.join(UPLOAD_DIR, code);
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
     const id = crypto.randomUUID();
+    file.id = id; // stash so the route handler can read it back off req.files
     const ext = path.extname(file.originalname).slice(0, 20);
-    const key = `files/${code}/${id}${ext}`;
-    file.id = id;
-    file.r2Key = key;
-
-    let bytes = 0;
-    file.stream.on('data', (chunk) => { bytes += chunk.length; });
-
-    const upload = new Upload({
-      client: s3,
-      params: { Bucket: R2_BUCKET, Key: key, Body: file.stream, ContentType: file.mimetype },
-      queueSize: 4,
-      partSize: 8 * 1024 * 1024
-    });
-
-    upload.done()
-      .then(() => cb(null, { size: bytes, r2Key: key }))
-      .catch(err => cb(err));
+    cb(null, id + ext);
   }
-
-  _removeFile(req, file, cb) {
-    if (!file.r2Key) return cb(null);
-    s3.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: file.r2Key }))
-      .catch(() => {})
-      .finally(() => cb(null));
-  }
-}
+});
 
 const upload = multer({
-  storage: new R2Storage(),
+  storage,
   limits: { fileSize: MAX_FILE_MB * 1024 * 1024, files: 20 }
 });
 
@@ -200,25 +92,14 @@ function validateCode(req, res, next) {
   next();
 }
 
-// let the frontend read current limits instead of hardcoding them
-app.get('/api/config', (req, res) => {
-  res.json({ maxFileMB: MAX_FILE_MB, fileTtlHours: FILE_TTL_HOURS });
-});
-
 // list files in a room
-app.get('/api/rooms/:code/files', validateCode, async (req, res) => {
-  try {
-    const files = (await getRoomMeta(req.params.code)).filter(f => !isExpired(f));
-    res.json({ files });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Could not load files.' });
-  }
+app.get('/api/rooms/:code/files', validateCode, (req, res) => {
+  res.json({ files: db[req.params.code] || [] });
 });
 
 // upload one or more files into a room
 app.post('/api/rooms/:code/upload', validateCode, (req, res) => {
-  upload.array('files', 20)(req, res, async (err) => {
+  upload.array('files', 20)(req, res, (err) => {
     if (err) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(413).json({ error: `File too large. Max ${MAX_FILE_MB}MB per file.` });
@@ -229,84 +110,60 @@ app.post('/api/rooms/:code/upload', validateCode, (req, res) => {
     if (!req.files || !req.files.length) {
       return res.status(400).json({ error: 'No files received.' });
     }
+    db[code] = db[code] || [];
     const added = req.files.map(f => ({
       id: f.id,
       name: f.originalname,
       size: f.size,
       type: f.mimetype || 'application/octet-stream',
-      r2Key: f.r2Key,
+      storedName: f.filename,
       uploadedAt: Date.now()
     }));
-    try {
-      const existing = await getRoomMeta(code);
-      await saveRoomMeta(code, existing.concat(added));
-      io.to(code).emit('files-added', added);
-      res.json({ files: added });
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: 'Files uploaded but saving the room list failed. Try refreshing.' });
-    }
+    db[code].push(...added);
+    saveDB();
+    io.to(code).emit('files-added', added);
+    res.json({ files: added });
   });
 });
 
-// download a single file — redirects the browser straight to a short-lived,
-// signed R2 URL so large files never get relayed through this server
-app.get('/api/rooms/:code/files/:id/download', validateCode, async (req, res) => {
+// download a single file
+app.get('/api/rooms/:code/files/:id/download', validateCode, (req, res) => {
   const { code, id } = req.params;
-  try {
-    const list = await getRoomMeta(code);
-    const meta = list.find(f => f.id === id);
-    if (!meta) return res.status(404).send('File not found.');
-    if (isExpired(meta)) return res.status(410).send('This file has expired.');
-    const url = await getSignedUrl(s3, new GetObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: meta.r2Key,
-      ResponseContentDisposition: contentDisposition(meta.name)
-    }), { expiresIn: 300 });
-    res.redirect(url);
-  } catch (e) {
-    console.error(e);
-    res.status(500).send('Could not generate a download link.');
-  }
+  const meta = (db[code] || []).find(f => f.id === id);
+  if (!meta) return res.status(404).send('File not found.');
+  const filePath = path.join(UPLOAD_DIR, code, meta.storedName);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File not found on disk.');
+  res.download(filePath, meta.name);
 });
 
-// remove a single file
-app.delete('/api/rooms/:code/files/:id', validateCode, async (req, res) => {
+// remove a single file (lets people clear their own uploads if they want to)
+app.delete('/api/rooms/:code/files/:id', validateCode, (req, res) => {
   const { code, id } = req.params;
-  try {
-    const list = await getRoomMeta(code);
-    const idx = list.findIndex(f => f.id === id);
-    if (idx === -1) return res.status(404).json({ error: 'File not found.' });
-    const [meta] = list.splice(idx, 1);
-    await saveRoomMeta(code, list);
-    await s3.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: meta.r2Key })).catch(() => {});
-    io.to(code).emit('file-removed', { id });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Could not remove that file.' });
-  }
+  const list = db[code] || [];
+  const idx = list.findIndex(f => f.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'File not found.' });
+  const [meta] = list.splice(idx, 1);
+  saveDB();
+  fs.unlink(path.join(UPLOAD_DIR, code, meta.storedName), () => {});
+  io.to(code).emit('file-removed', { id });
+  res.json({ ok: true });
 });
 
 // fallback to the SPA shell for any other route
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(ROOT, 'public', 'index.html'));
 });
 
 // ---------- realtime ----------
 io.on('connection', (socket) => {
-  socket.on('join-room', (code) => { if (isValidCode(code)) socket.join(code); });
-  socket.on('leave-room', (code) => { if (isValidCode(code)) socket.leave(code); });
+  socket.on('join-room', (code) => {
+    if (isValidCode(code)) socket.join(code);
+  });
+  socket.on('leave-room', (code) => {
+    if (isValidCode(code)) socket.leave(code);
+  });
 });
 
-// fail fast and clearly if the bucket/credentials are wrong, rather than
-// mysteriously erroring on the first real upload
-s3.send(new HeadBucketCommand({ Bucket: R2_BUCKET }))
-  .then(() => {
-    server.listen(PORT, () => console.log(`Wavelength running at http://localhost:${PORT}`));
-  })
-  .catch((e) => {
-    console.error('Could not reach R2 bucket "' + R2_BUCKET + '":', e.message);
-    console.error('Check R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_BUCKET_NAME.');
-    process.exit(1);
-  });
+server.listen(PORT, () => {
+  console.log(`Wavelength running at http://localhost:${PORT}`);
+});
