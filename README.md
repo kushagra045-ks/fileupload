@@ -27,14 +27,17 @@ Set these as environment variables (or in a `.env` file if you add `dotenv`):
 | Variable         | Default | What it does                                              |
 |------------------|---------|-------------------------------------------------------------|
 | `PORT`           | `3000`  | Port the server listens on                                  |
-| `MAX_FILE_MB`    | `100`   | Max size per uploaded file, in MB                            |
-| `ROOM_TTL_HOURS` | `0`     | Auto-delete files older than this many hours (`0` = never)   |
+| `MAX_FILE_MB`    | `2048`  | Max size per uploaded file, in MB (2048 = 2GB)               |
+| `FILE_TTL_HOURS` | `1`     | Auto-delete files older than this many hours (`0` = never)   |
+| `ALLOWED_ORIGIN` | `*`     | Comma-separated origins allowed to call the API (CORS)       |
 
 Example:
 
 ```bash
-PORT=8080 MAX_FILE_MB=250 npm start
+PORT=8080 MAX_FILE_MB=4096 FILE_TTL_HOURS=6 npm start
 ```
+
+The frontend reads `MAX_FILE_MB` and `FILE_TTL_HOURS` from the backend automatically at `/api/config` — no need to duplicate them anywhere in `public/`.
 
 ## How it's structured
 
@@ -52,6 +55,50 @@ wavelength/
 Files are named by a random UUID on disk (not the original filename) to avoid
 collisions and path traversal issues; the original filename is preserved in
 the metadata and used again on download.
+
+## Hosting split across Cloudflare Pages + a separate backend
+
+Cloudflare Pages (and GitHub Pages) only serve static files — they can't run
+`server.js`. If you want to keep the frontend on Cloudflare Pages, the
+backend has to run somewhere else that hosts a persistent Node process
+(Render, Railway, Fly.io, a VPS). Two pieces, two URLs, wired together with
+CORS. Steps:
+
+1. **Deploy the backend.** Push this whole repo to Render/Railway/Fly.io.
+   Set the start command to `npm start`. Note the URL it gives you, e.g.
+   `https://wavelength-backend.onrender.com`. If that platform has an
+   ephemeral filesystem, attach a persistent disk/volume mounted at
+   `uploads/` and `data/` (see the ephemeral-filesystem note further down) —
+   otherwise every uploaded file disappears on the next deploy or restart.
+
+2. **Lock down CORS.** On the backend host, set an environment variable:
+   ```
+   ALLOWED_ORIGIN=https://your-project.pages.dev
+   ```
+   (comma-separate multiple origins if you have a custom domain too, e.g.
+   `https://your-project.pages.dev,https://files.yourdomain.com`). Without
+   this it defaults to `*`, which works but allows any website to call your
+   API.
+
+3. **Point the frontend at the backend.** Edit `public/config.js`:
+   ```js
+   window.API_BASE = "https://wavelength-backend.onrender.com";
+   ```
+   Commit and push. Cloudflare Pages will redeploy the static site
+   automatically if it's connected to your GitHub repo.
+
+4. **Set the Pages build settings** (if you haven't already) so it only
+   serves the `public/` folder: in the Cloudflare Pages project settings,
+   set **Build output directory** to `public`, and leave the build command
+   empty since there's nothing to build.
+
+That's it — the static site on Pages now talks cross-origin to the Node
+backend for uploads, downloads, and the live Socket.io connection. If
+uploads still fail after this, open your browser's dev tools → Network tab
+and check the failing request: a CORS error in the console means
+`ALLOWED_ORIGIN` doesn't match your Pages URL exactly (check for a trailing
+slash or `www.` mismatch); a `502`/timeout usually means the backend itself
+isn't running or crashed — check its logs on Render/Railway/Fly.
 
 ## Hosting it yourself
 
@@ -114,8 +161,15 @@ is a fairly small change to `server.js` — ask me if you want that version.
   a shared folder with a weak lock, not a secure vault. If you need real
   access control, the easiest addition is a per-room passphrase checked on
   join.
-- There's no automatic expiry by default (`ROOM_TTL_HOURS=0`). Turn it on if
-  you don't want files piling up forever.
-- Uploads are capped by `MAX_FILE_MB` per file; there's no total storage cap,
-  so on a small server you'll want to keep an eye on disk usage or set up a
-  cron job to prune old room folders.
+- There's automatic expiry on by default (`FILE_TTL_HOURS=1`) — files vanish
+  an hour after upload. Raise it if you want things to stick around longer,
+  or set it to `0` to disable (not recommended once this is public).
+- Uploads are capped by `MAX_FILE_MB` (2GB by default) per file; there's no
+  total storage cap, so on a small server you'll want to keep an eye on disk
+  usage or set up a cron job to prune old room folders.
+- **Free hosting tiers and big files don't mix well.** A 2GB upload takes a
+  while even on a fast connection, and free tiers on Render/Railway/etc.
+  often sleep the service after inactivity, cap request duration, or throttle
+  bandwidth. If large uploads keep failing partway through on a free host,
+  that's the most likely cause — check that host's specific limits, or budget
+  for a paid tier once you're past the demo stage.
