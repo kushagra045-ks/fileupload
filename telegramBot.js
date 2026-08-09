@@ -67,6 +67,47 @@ function startTelegramBot({ s3, bucket, maxFileMB, io, getRoomMeta, saveRoomMeta
     return next();
   });
 
+  const MAX_ATTEMPTS = 3;
+
+  async function pullFileIntoRoom(fileId, name, mimeType, code, onProgress) {
+    const link = await bot.telegram.getFileLink(fileId);
+    const res = await fetch(link.href || link.toString());
+    if (!res.ok || !res.body) throw new Error('Telegram file fetch failed: HTTP ' + res.status);
+
+    const id = crypto.randomUUID();
+    const ext = path.extname(name || '').slice(0, 20);
+    const key = `files/${code}/${id}${ext}`;
+
+    let bytes = 0;
+    let lastReported = 0;
+    const nodeStream = Readable.fromWeb(res.body);
+    nodeStream.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (onProgress && bytes - lastReported > 50 * 1024 * 1024) { // every ~50MB
+        lastReported = bytes;
+        onProgress(bytes);
+      }
+    });
+
+    const upload = new Upload({
+      client: s3,
+      params: { Bucket: bucket, Key: key, Body: nodeStream, ContentType: mimeType || 'application/octet-stream' },
+      queueSize: 4,
+      partSize: 8 * 1024 * 1024
+    });
+    await upload.done();
+
+    const meta = {
+      id, name: name || id, size: bytes,
+      type: mimeType || 'application/octet-stream',
+      storageKey: key, uploadedAt: Date.now()
+    };
+    const existing = await getRoomMeta(code);
+    await saveRoomMeta(code, existing.concat([meta]));
+    io.to(code).emit('files-added', [meta]);
+    return meta;
+  }
+
   async function handleIncomingFile(ctx, { fileId, name, mimeType, size }) {
     const code = activeRoom.get(ctx.chat.id);
     if (!code) {
@@ -79,51 +120,37 @@ function startTelegramBot({ s3, bucket, maxFileMB, io, getRoomMeta, saveRoomMeta
       return ctx.reply(reason);
     }
 
-    let statusMsg;
-    try {
-      statusMsg = await ctx.reply('Pulling that in\u2026');
+    const statusMsg = await ctx.reply('Pulling that in\u2026');
+    const updateStatus = (text) => {
+      ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, text).catch(() => {});
+    };
 
-      const link = await ctx.telegram.getFileLink(fileId);
-      const res = await fetch(link.href || link.toString());
-      if (!res.ok || !res.body) throw new Error('Telegram file fetch failed: ' + res.status);
-
-      const id = crypto.randomUUID();
-      const ext = path.extname(name || '').slice(0, 20);
-      const key = `files/${code}/${id}${ext}`;
-
-      let bytes = 0;
-      const nodeStream = Readable.fromWeb(res.body);
-      nodeStream.on('data', (chunk) => { bytes += chunk.length; });
-
-      const upload = new Upload({
-        client: s3,
-        params: { Bucket: bucket, Key: key, Body: nodeStream, ContentType: mimeType || 'application/octet-stream' },
-        queueSize: 4,
-        partSize: 8 * 1024 * 1024
-      });
-      await upload.done();
-
-      const meta = {
-        id, name: name || id, size: bytes,
-        type: mimeType || 'application/octet-stream',
-        storageKey: key, uploadedAt: Date.now()
-      };
-      const existing = await getRoomMeta(code);
-      await saveRoomMeta(code, existing.concat([meta]));
-      io.to(code).emit('files-added', [meta]);
-
-      const link2 = siteUrl ? `\n${siteUrl}/#/room/${code}` : '';
-      await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined,
-        `Done \u2014 "${meta.name}" is live on ${code}${link2}`);
-    } catch (e) {
-      console.error('Telegram upload failed:', e.message);
-      const msg = "Couldn't grab that file \u2014 try again?";
-      if (statusMsg) {
-        ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, msg).catch(() => {});
-      } else {
-        ctx.reply(msg).catch(() => {});
+    let lastError;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const meta = await pullFileIntoRoom(fileId, name, mimeType, code, (bytes) => {
+          updateStatus(`Pulling that in\u2026 ${(bytes / (1024 * 1024)).toFixed(0)}MB so far`);
+        });
+        const link2 = siteUrl ? `\n${siteUrl}/#/room/${code}` : '';
+        return updateStatus(`Done \u2014 "${meta.name}" is live on ${code}${link2}`);
+      } catch (e) {
+        lastError = e;
+        // Node wraps most network failures as a generic "fetch failed" —
+        // the real reason lives in e.cause. Log both so it's actually
+        // possible to tell what happened from Render's logs.
+        console.error(
+          `Telegram upload attempt ${attempt}/${MAX_ATTEMPTS} failed:`,
+          e.message, e.cause ? '| cause: ' + e.cause.message : ''
+        );
+        if (attempt < MAX_ATTEMPTS) {
+          updateStatus(`Connection hiccup, retrying (${attempt}/${MAX_ATTEMPTS - 1})\u2026`);
+          await new Promise(r => setTimeout(r, 3000 * attempt));
+        }
       }
     }
+
+    console.error('Telegram upload failed after retries:', lastError?.message, lastError?.cause?.message || '');
+    updateStatus("Couldn't grab that file after a few tries \u2014 might be worth trying again, or a smaller file.");
   }
 
   bot.on('document', (ctx) => handleIncomingFile(ctx, {
