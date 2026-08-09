@@ -158,20 +158,25 @@ already knows how to talk to it — no per-file setup needed beyond deploying
 it correctly.
 
 On Render:
-0. **If you already have the old `aiogram/telegram-bot-api` service running** (the one that gave the "file is too big" error) — Render doesn't let you switch a service's source from "existing image" to "build from repo" in place. Easiest path: delete that old service and create a fresh one below. Your main Wavelength service and its data are unaffected either way.
+0. **If you already have an older `aiogram/telegram-bot-api` service running** (from before this custom-image setup) — Render doesn't let you switch a service's source from "existing image" to "build from repo" in place. Easiest path: delete that old service and create a fresh one below. Your main Wavelength service and its data are unaffected either way.
 1. **New +** → **Web Service**.
-2. Connect the GitHub repo (not "deploy an existing image" this time — we're building from a Dockerfile now).
-3. Under **Root Directory**, set: `telegram-bot-api-docker`
-4. Render should auto-detect the Dockerfile in that folder. If it asks for a build/start command, leave them blank — the Dockerfile's `ENTRYPOINT` handles everything.
-5. Add environment variables:
+2. Connect the GitHub repo.
+3. Find the **Language/Runtime** dropdown (usually near the top of the form, above Root Directory) and set it explicitly to **Docker**. Render sometimes defaults this to "Node" because it sees `package.json` at the repo root — if you skip this step, it'll try to run this folder as a plain Node app and fail, since there's no `server.js` here.
+4. Under **Root Directory**, set: `telegram-bot-api-docker`
+5. It should now auto-detect the `Dockerfile` in that folder. Leave build/start commands blank — the Dockerfile's `ENTRYPOINT` handles everything.
+6. Add environment variables:
    ```
    TELEGRAM_API_ID=<api_id from step 1>
    TELEGRAM_API_HASH=<api_hash from step 1>
-   PORT=8081
    ```
-   (`TELEGRAM_LOCAL` isn't needed anymore — this image always runs in local mode; one less thing to misconfigure.)
-6. Deploy. **This build takes noticeably longer than the old one** — it's compiling nothing (it copies the pre-built binary from the image you already had working), but it does install nginx and build a new image layer, so expect a few minutes, not seconds.
-7. Check the logs for nginx and telegram-bot-api both starting without errors. Note the service's public URL, e.g. `https://your-bot-api.onrender.com`.
+   **Don't set `PORT` here.** Render provides it automatically, and this
+   image's own internal Bot API process uses a fixed different port
+   (8090) specifically so the two can never collide — setting `PORT`
+   manually to match an old value from a previous setup is what caused a
+   "port already in use" crash the first time around.
+   (`TELEGRAM_LOCAL` isn't needed either — this image always runs in local mode; one less thing to misconfigure.)
+7. Deploy. **This build takes noticeably longer than a plain image pull** — it's compiling nothing (it copies the pre-built binary from the image you already had working), but it does install nginx and build a new image layer, so expect a few minutes, not seconds. You should see actual Docker build steps in the log (`Step 1/7 : FROM aiogram/telegram-bot-api...`) — if you see `npm install` instead, the Language/Runtime dropdown in step 3 didn't get set to Docker.
+8. Check the logs for nginx and telegram-bot-api both starting without errors. Note the service's public URL, e.g. `https://your-bot-api.onrender.com`.
 
 If this build fails, it'll fail loudly with a clear Docker build error in
 Render's logs (not a confusing runtime bug) — paste that error and it's

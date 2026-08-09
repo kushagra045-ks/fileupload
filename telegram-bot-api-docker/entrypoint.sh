@@ -8,12 +8,16 @@ fi
 
 mkdir -p /var/lib/telegram-bot-api /tmp/telegram-bot-api
 
-# Start the real Bot API server on an internal-only port. Always run in
-# --local mode — that's the entire point of this image, so it's not left
-# as an optional toggle the way the plain upstream image does it.
+# Internal-only port for the real Bot API process — nginx is the only
+# thing that talks to this directly, so it deliberately does NOT use
+# $PORT (that's the public-facing port nginx binds to, below). Using two
+# different fixed numbers here avoids the two processes ever fighting
+# over the same port regardless of what $PORT gets set to.
+BOTAPI_INTERNAL_PORT=8090
+
 telegram-bot-api \
   --local \
-  --http-port=8081 \
+  --http-port=$BOTAPI_INTERNAL_PORT \
   --dir=/var/lib/telegram-bot-api \
   --temp-dir=/tmp/telegram-bot-api \
   --api-id="$TELEGRAM_API_ID" \
@@ -21,10 +25,14 @@ telegram-bot-api \
 
 BOTAPI_PID=$!
 
-# Render tells us which port to listen on publicly via $PORT (defaults to
-# 8081 to match what you likely already have set from the earlier setup).
-PORT="${PORT:-8081}"
-sed "s/__PORT__/${PORT}/" /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+# This is the port Render actually routes public traffic to. Render sets
+# $PORT itself by default (usually 10000) — you generally don't need to
+# set it manually for this service at all.
+PORT="${PORT:-10000}"
+sed \
+  -e "s/__PORT__/${PORT}/" \
+  -e "s/__BOTAPI_INTERNAL_PORT__/${BOTAPI_INTERNAL_PORT}/" \
+  /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
 # If the Bot API process dies, bring the whole container down so Render
 # restarts it cleanly, rather than limping along with nginx serving a

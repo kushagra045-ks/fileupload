@@ -14,6 +14,6 @@ COPY nginx.conf.template /etc/nginx/nginx.conf.template
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 8081
+EXPOSE 10000
 
 ENTRYPOINT ["/entrypoint.sh"]
