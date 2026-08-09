@@ -15,12 +15,13 @@ const {
 } = require('@aws-sdk/client-s3');
 const { Upload } = require('@aws-sdk/lib-storage');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { startTelegramBot } = require('./telegramBot');
 
 // ---------- config ----------
 const PORT = process.env.PORT || 3000;
 // 2048 MB = 2GB default. Raise via env if you need bigger. Note this is
 // enforced by this app, not by the storage provider.
-const MAX_FILE_MB = Number(process.env.MAX_FILE_MB || 2048);
+const MAX_FILE_MB = Number(process.env.MAX_FILE_MB || 4096);
 // Files older than this many hours are deleted automatically. Minimum
 // sensible value is 1; set to 0 only if you really want files to live
 // forever (not recommended once this is public — see the abuse notes in
@@ -309,6 +310,16 @@ io.on('connection', (socket) => {
 s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }))
   .then(() => {
     server.listen(PORT, () => console.log(`Wavelength running at http://localhost:${PORT}`));
+    startTelegramBot({
+      s3,
+      bucket: S3_BUCKET,
+      maxFileMB: MAX_FILE_MB,
+      io,
+      getRoomMeta,
+      saveRoomMeta,
+      isValidCode,
+      siteUrl: process.env.PUBLIC_SITE_URL || null
+    });
   })
   .catch((e) => {
     console.error('Could not reach storage bucket "' + S3_BUCKET + '":', e.message);

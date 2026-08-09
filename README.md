@@ -89,7 +89,7 @@ a second tab/browser to see files sync live between them.
 | Variable         | Default | What it does                                              |
 |------------------|---------|-------------------------------------------------------------|
 | `PORT`           | `3000`  | Port the server listens on                                  |
-| `MAX_FILE_MB`    | `2048`  | Max size per uploaded file, in MB (2048 = 2GB)               |
+| `MAX_FILE_MB`    | `4096`  | Max size per uploaded file, in MB (4096 = 4GB)               |
 | `FILE_TTL_HOURS` | `1`     | Auto-delete files older than this many hours (`0` = never)   |
 | `ALLOWED_ORIGIN` | `*`     | Comma-separated origins allowed to call the API (CORS)       |
 | `S3_ENDPOINT`    | —       | Required. Your storage provider's S3-compatible endpoint.    |
@@ -118,11 +118,103 @@ disk stop being a data-loss risk** — your files are safe regardless of what
 the server itself does. Spin-down still means a slow (30-60s) first load
 after inactivity, but nothing gets deleted anymore.
 
+## Optional: upload files by sending them to a Telegram bot
+
+Instead of downloading a file from Telegram and re-uploading it to Wavelength
+yourself, you can send it straight to a bot, which pulls it server-to-server
+and drops it into a room — usually much faster than round-tripping through
+your own device.
+
+**Important limitation to know first:** Telegram's normal Bot API only lets
+a bot download files up to 20MB. To handle files up to ~2GB (matching this
+app's default limit), you need to run your **own** self-hosted Telegram Bot
+API server — a real Telegram feature, not a workaround, but it means a
+second always-running service.
+
+### 1. Get Telegram API credentials
+
+1. Go to **my.telegram.org**, log in with your phone number.
+2. Click **API development tools**, fill in the form (app name/description
+   can be anything), and submit.
+3. Note the **api_id** and **api_hash** it gives you.
+
+### 2. Create the bot itself
+
+1. In Telegram, message **@BotFather**.
+2. Send `/newbot`, follow the prompts (name, username).
+3. Copy the **bot token** it gives you.
+
+### 3. Deploy the local Bot API server (a second service)
+
+This runs the official `aiogram/telegram-bot-api` Docker image, which is
+what raises the 20MB limit to ~2GB.
+
+On Render:
+1. **New +** → **Web Service**.
+2. Choose **Deploy an existing image from a registry** (instead of connecting a GitHub repo).
+3. Image URL: `aiogram/telegram-bot-api:latest`.
+4. Set the port to `8081`.
+5. Add environment variables:
+   ```
+   TELEGRAM_API_ID=<api_id from step 1>
+   TELEGRAM_API_HASH=<api_hash from step 1>
+   ```
+6. Deploy. Once it's running, note its internal/public URL — Render gives
+   services on the same account an internal URL you can use instead of
+   going out over the public internet, which is faster; check Render's
+   docs for "private services" if you want that. The public URL works
+   fine too, just include the port: `https://your-bot-api.onrender.com`.
+
+### 4. Point Wavelength at the bot
+
+On your existing Wavelength service (the one running `server.js`), add:
+
+```
+TELEGRAM_BOT_TOKEN=<bot token from step 2>
+TELEGRAM_LOCAL_API_URL=https://your-bot-api.onrender.com
+PUBLIC_SITE_URL=https://your-wavelength-site.onrender.com
+```
+
+(`PUBLIC_SITE_URL` is optional — just used to include a clickable link back
+to the room in the bot's confirmation message.)
+
+Redeploy. Check the logs for `Telegram bot connected via local API server
+at ...`. If those two env vars aren't set, the bot feature silently does
+nothing — the website still runs fine either way.
+
+### 5. Use it
+
+1. Message your bot on Telegram, send `/room 1234` (whatever room code
+   you're using).
+2. Send it any file — document, photo, video, audio, voice note.
+3. It replies once uploaded, and the file shows up live in that room on the
+   website, exactly like uploading through the browser.
+
+### Things worth knowing about this setup
+
+- **Free-tier spin-down affects this too, and in a less obvious way than
+  the website itself.** If your Wavelength service spins down from
+  inactivity, its Telegram-polling loop stops along with everything else —
+  so a file you send while it's asleep won't be picked up until the next
+  time something wakes the service (a site visit, or Telegram's own retry
+  once it wakes). If you want the bot to feel instantly responsive at any
+  hour, you'd want either a keep-alive ping on the main site or a paid
+  always-on instance.
+- **Which room a chat is "tuned to" is stored in memory**, not the bucket —
+  it resets on every restart/redeploy, meaning you'd need to re-send
+  `/room 1234` after a deploy. Fine for casual/personal use; ask if you
+  want that persisted instead.
+- The local Bot API server's own storage is just a transient buffer while
+  it hands files to your server — it doesn't need to persist anything long
+  term, so its free-tier ephemeral disk isn't a data-loss concern the way
+  it was for the website's original setup.
+
 ## How it's structured
 
 ```
 wavelength/
   server.js          Express API + Socket.io + object storage
+  telegramBot.js     optional: Telegram bot integration (see setup above)
   public/
     index.html        page shell
     style.css          all styling
@@ -147,9 +239,15 @@ the `Content-Disposition` header.
   hour after upload, both the stored object and the metadata entry. Raise it
   if you want things to stick around longer, or set it to `0` to disable
   (not recommended once this is public).
-- Uploads are capped by `MAX_FILE_MB` (2GB by default) per file. Backblaze
-  B2's free tier includes 10GB of storage total — keep an eye on usage as
-  it grows; past that it's roughly $6/TB/month, still inexpensive.
+- Uploads are capped by `MAX_FILE_MB` (4GB by default) per file via the
+  website. Backblaze B2's free tier includes 10GB of storage total — a
+  single 4GB file eats nearly half of that, so keep an eye on usage; past
+  the free tier it's roughly $6/TB/month, still inexpensive.
+- **The Telegram bot path has a lower, fixed ceiling of ~2GB regardless of
+  `MAX_FILE_MB`.** That's a hard limit on Telegram's own servers (bots
+  can't receive anything bigger, even via a self-hosted local API server),
+  not something this app can configure around. The bot tells the sender
+  clearly when that's the reason a file was skipped.
 - Room metadata is a simple read-modify-write JSON object per room. Two
   people uploading to the *exact* same room in the *exact* same instant can
   theoretically overwrite each other's metadata update (rare, and only
