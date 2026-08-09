@@ -1,4 +1,15 @@
 worker_processes auto;
+# Alpine's nginx package defaults to running worker processes as a
+# restricted "nginx" user when this isn't set. telegram-bot-api (started
+# by our entrypoint) runs as root and writes files that user can't read,
+# which is exactly what causes a 403 on an otherwise-correct static file
+# request. Matching both processes to root removes that mismatch. This
+# container isn't multi-tenant and this port isn't meant to be exposed
+# beyond your own services, so the usual reasons to avoid running nginx
+# as root don't really apply here — but if you harden this later, the
+# alternative is telling telegram-bot-api to run as the "nginx" user
+# instead via --username/--groupname.
+user root;
 events {
   worker_connections 1024;
 }
