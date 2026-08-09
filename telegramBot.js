@@ -41,13 +41,30 @@ function startTelegramBot({ s3, bucket, maxFileMB, io, getRoomMeta, saveRoomMeta
     `Then just send files — documents, photos, videos, audio all work, up to ${effectiveMaxMB}MB each.`
   ));
 
+  function setRoom(ctx, code) {
+    activeRoom.set(ctx.chat.id, code);
+    ctx.reply(`Tuned to room ${code}. Send files now — they'll show up there instantly.`);
+  }
+
   bot.command('room', (ctx) => {
-    const code = (ctx.message.text.split(' ')[1] || '').trim();
+    // Pull out the first run of exactly 4 digits anywhere after the
+    // command, rather than splitting on a single space — this tolerates
+    // "/room  1234" (double space), "/room@YourBot 1234", trailing
+    // punctuation, etc.
+    const match = ctx.message.text.match(/\d{4}/);
+    const code = match ? match[0] : '';
     if (!isValidCode(code)) {
       return ctx.reply('Room codes are 4 digits, e.g. /room 4821');
     }
-    activeRoom.set(ctx.chat.id, code);
-    ctx.reply(`Tuned to room ${code}. Send files now — they'll show up there instantly.`);
+    setRoom(ctx, code);
+  });
+
+  // If someone just sends a bare 4-digit code with no /room prefix,
+  // treat it the same way — matches how the website itself takes a code.
+  bot.on('text', (ctx, next) => {
+    const trimmed = ctx.message.text.trim();
+    if (isValidCode(trimmed)) return setRoom(ctx, trimmed);
+    return next();
   });
 
   async function handleIncomingFile(ctx, { fileId, name, mimeType, size }) {
