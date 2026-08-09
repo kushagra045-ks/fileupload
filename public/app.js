@@ -49,6 +49,32 @@
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
+  // ---------------- server limits (max size, expiry) ----------------
+  let serverConfig = { maxFileMB: null, fileTtlHours: null };
+  let serverConfigReady = fetch(API_BASE + '/api/config')
+    .then(r => r.json())
+    .then(data => { serverConfig = data; })
+    .catch(() => { /* fall back silently — validation still happens server-side */ });
+
+  function fmtMB(mb) {
+    if (!mb) return '';
+    return mb >= 1024 ? (mb % 1024 === 0 ? mb / 1024 : (mb / 1024).toFixed(1)) + 'GB' : mb + 'MB';
+  }
+  function fmtDuration(hours) {
+    if (!hours) return null;
+    if (hours < 1) return Math.round(hours * 60) + ' min';
+    if (hours === 1) return '1 hour';
+    return (Number.isInteger(hours) ? hours : hours.toFixed(1)) + ' hours';
+  }
+  function fmtExpiresIn(uploadedAt) {
+    if (!serverConfig.fileTtlHours) return null;
+    const remaining = (uploadedAt + serverConfig.fileTtlHours * 3600 * 1000) - Date.now();
+    if (remaining <= 0) return 'expiring…';
+    if (remaining < 60000) return 'expires in <1m';
+    if (remaining < 3600000) return 'expires in ' + Math.ceil(remaining / 60000) + 'm';
+    return 'expires in ' + Math.ceil(remaining / 3600000) + 'h';
+  }
+
   // ---------------- routing ----------------
   function currentCode() {
     const m = location.hash.match(/^#\/room\/(\d{4})$/);
@@ -151,6 +177,7 @@
 
   function renderRoom(code) {
     if (socket) { socket.disconnect(); socket = null; }
+    if (roomState.tickTimer) { clearInterval(roomState.tickTimer); roomState.tickTimer = null; }
     roomState.code = code;
     roomState.files = [];
     roomState.uploading = []; // { tempId, name, size, progress }
@@ -182,7 +209,7 @@
             </svg>
           </div>
           <div class="dropzone-text"><b>Drop files here</b> or click to browse</div>
-          <div class="dropzone-sub">visible to anyone on ${code}</div>
+          <div class="dropzone-sub" id="dropzoneSub">visible to anyone on ${code}</div>
           <input type="file" id="fileInput" multiple>
         </div>
 
@@ -218,6 +245,20 @@
 
     connectSocket(code);
     loadFiles();
+
+    serverConfigReady.then(() => {
+      const subEl = document.getElementById('dropzoneSub');
+      if (subEl) {
+        const parts = [];
+        if (serverConfig.maxFileMB) parts.push('up to ' + fmtMB(serverConfig.maxFileMB) + ' per file');
+        if (serverConfig.fileTtlHours) parts.push('auto-deletes after ' + fmtDuration(serverConfig.fileTtlHours));
+        parts.push('visible to anyone on ' + code);
+        subEl.textContent = parts.join(' \u00b7 ');
+      }
+      renderFileList();
+    });
+
+    roomState.tickTimer = setInterval(renderFileList, 30000);
   }
 
   function setSignal(connected) {
@@ -297,7 +338,7 @@
         <div class="file-icon">${iconFor(f.type)}</div>
         <div class="file-info">
           <div class="file-name">${escapeHtml(f.name)}</div>
-          <div class="file-meta">${fmtSize(f.size)} &middot; ${fmtTime(f.uploadedAt)}</div>
+          <div class="file-meta">${fmtSize(f.size)} &middot; ${fmtTime(f.uploadedAt)}${fmtExpiresIn(f.uploadedAt) ? ' &middot; ' + fmtExpiresIn(f.uploadedAt) : ''}</div>
         </div>
         <div class="file-actions">
           <a class="file-dl" href="${API_BASE}/api/rooms/${roomState.code}/files/${f.id}/download" title="Download">
@@ -333,8 +374,16 @@
   }
 
   function handleFiles(fileListArg) {
-    const files = Array.from(fileListArg);
+    let files = Array.from(fileListArg);
     if (!files.length) return;
+
+    if (serverConfig.maxFileMB) {
+      const maxBytes = serverConfig.maxFileMB * 1024 * 1024;
+      const tooBig = files.filter(f => f.size > maxBytes);
+      files = files.filter(f => f.size <= maxBytes);
+      tooBig.forEach(f => showToast('"' + f.name + '" is over the ' + fmtMB(serverConfig.maxFileMB) + ' limit', true));
+      if (!files.length) return;
+    }
 
     const formData = new FormData();
     files.forEach(f => formData.append('files', f, f.name));
