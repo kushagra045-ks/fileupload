@@ -68,11 +68,25 @@ function startTelegramBot({ s3, bucket, maxFileMB, io, getRoomMeta, saveRoomMeta
   });
 
   const MAX_ATTEMPTS = 3;
+  // In --local mode, getFile returns an absolute disk path under this
+  // directory instead of a normal relative file_path. The custom nginx
+  // image (see telegram-bot-api-docker/) serves that same directory as
+  // static files, so we strip this known prefix and request the
+  // remainder directly.
+  const LOCAL_FILE_ROOT = '/var/lib/telegram-bot-api/';
+
+  async function getDownloadUrl(fileId) {
+    const file = await bot.telegram.getFile(fileId);
+    let rel = file.file_path || '';
+    if (rel.startsWith(LOCAL_FILE_ROOT)) rel = rel.slice(LOCAL_FILE_ROOT.length);
+    else rel = rel.replace(/^\/+/, ''); // defensive fallback if the prefix ever changes
+    return `${apiRoot.replace(/\/$/, '')}/${rel}`;
+  }
 
   async function pullFileIntoRoom(fileId, name, mimeType, code, onProgress) {
-    const link = await bot.telegram.getFileLink(fileId);
-    const res = await fetch(link.href || link.toString());
-    if (!res.ok || !res.body) throw new Error('Telegram file fetch failed: HTTP ' + res.status);
+    const downloadUrl = await getDownloadUrl(fileId);
+    const res = await fetch(downloadUrl);
+    if (!res.ok || !res.body) throw new Error('File fetch failed: HTTP ' + res.status + ' for ' + downloadUrl);
 
     const id = crypto.randomUUID();
     const ext = path.extname(name || '').slice(0, 20);

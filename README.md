@@ -144,26 +144,38 @@ second always-running service.
 2. Send `/newbot`, follow the prompts (name, username).
 3. Copy the **bot token** it gives you.
 
-### 3. Deploy the local Bot API server (a second service)
+### 3. Deploy the bot-api server (a second service, built from a Dockerfile)
 
-This runs the official `aiogram/telegram-bot-api` Docker image, which is
-what raises the 20MB limit to ~2GB.
+**Why this isn't just the plain `aiogram/telegram-bot-api` image:** `--local`
+mode (required to get past 20MB) makes Telegram's server return an
+*absolute file path on its own disk* instead of a downloadable link. If
+your bot code runs in a different container — which it does here — it has
+no way to read that path directly. The image in `telegram-bot-api-docker/`
+in this repo fixes that: it's the same `aiogram/telegram-bot-api` image you
+were using, with nginx added so one single port both proxies the real Bot
+API *and* serves the downloaded files straight off disk. `telegramBot.js`
+already knows how to talk to it — no per-file setup needed beyond deploying
+it correctly.
 
 On Render:
+0. **If you already have the old `aiogram/telegram-bot-api` service running** (the one that gave the "file is too big" error) — Render doesn't let you switch a service's source from "existing image" to "build from repo" in place. Easiest path: delete that old service and create a fresh one below. Your main Wavelength service and its data are unaffected either way.
 1. **New +** → **Web Service**.
-2. Choose **Deploy an existing image from a registry** (instead of connecting a GitHub repo).
-3. Image URL: `aiogram/telegram-bot-api:latest`.
-4. Set the port to `8081`.
+2. Connect the GitHub repo (not "deploy an existing image" this time — we're building from a Dockerfile now).
+3. Under **Root Directory**, set: `telegram-bot-api-docker`
+4. Render should auto-detect the Dockerfile in that folder. If it asks for a build/start command, leave them blank — the Dockerfile's `ENTRYPOINT` handles everything.
 5. Add environment variables:
    ```
    TELEGRAM_API_ID=<api_id from step 1>
    TELEGRAM_API_HASH=<api_hash from step 1>
+   PORT=8081
    ```
-6. Deploy. Once it's running, note its internal/public URL — Render gives
-   services on the same account an internal URL you can use instead of
-   going out over the public internet, which is faster; check Render's
-   docs for "private services" if you want that. The public URL works
-   fine too, just include the port: `https://your-bot-api.onrender.com`.
+   (`TELEGRAM_LOCAL` isn't needed anymore — this image always runs in local mode; one less thing to misconfigure.)
+6. Deploy. **This build takes noticeably longer than the old one** — it's compiling nothing (it copies the pre-built binary from the image you already had working), but it does install nginx and build a new image layer, so expect a few minutes, not seconds.
+7. Check the logs for nginx and telegram-bot-api both starting without errors. Note the service's public URL, e.g. `https://your-bot-api.onrender.com`.
+
+If this build fails, it'll fail loudly with a clear Docker build error in
+Render's logs (not a confusing runtime bug) — paste that error and it's
+usually a one-line fix.
 
 ### 4. Point Wavelength at the bot
 
@@ -208,6 +220,17 @@ nothing — the website still runs fine either way.
   it hands files to your server — it doesn't need to persist anything long
   term, so its free-tier ephemeral disk isn't a data-loss concern the way
   it was for the website's original setup.
+- **This custom Docker image (nginx + telegram-bot-api combined on one
+  port) was built carefully but not tested against a live Render
+  deployment** — the reasoning is sound and each piece is based on
+  documented, confirmed behavior, but if something's still off, the most
+  likely failure points are: the exact absolute-path prefix telegram-bot-api
+  writes files under (hardcoded as `/var/lib/telegram-bot-api/` in both the
+  Dockerfile and `telegramBot.js` — if a future version of the image changes
+  that, both need updating together), or nginx's `/bot` prefix match
+  conflicting with something unexpected. If downloads fail, check Render's
+  logs on the bot-api service itself (not just the main site) for nginx
+  or telegram-bot-api errors.
 
 ## How it's structured
 
@@ -215,6 +238,7 @@ nothing — the website still runs fine either way.
 wavelength/
   server.js          Express API + Socket.io + object storage
   telegramBot.js     optional: Telegram bot integration (see setup above)
+  telegram-bot-api-docker/   custom image: bot-api + nginx on one port (see setup above)
   public/
     index.html        page shell
     style.css          all styling

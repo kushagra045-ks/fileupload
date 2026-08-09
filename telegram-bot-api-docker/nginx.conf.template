@@ -1,0 +1,42 @@
+worker_processes auto;
+events {
+  worker_connections 1024;
+}
+
+http {
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+  sendfile on;
+
+  # Generous limits/timeouts since this exists specifically to move large
+  # files. Response size (downloads) isn't limited by nginx by default;
+  # these mainly matter for keeping slow transfers alive rather than
+  # getting cut off partway through.
+  client_max_body_size 4096m;
+  proxy_read_timeout 3600s;
+  proxy_send_timeout 3600s;
+  send_timeout 3600s;
+
+  server {
+    listen __PORT__;
+
+    # Every real Bot API call (getFile, getUpdates, sendMessage, ...) is
+    # shaped like /bot<token>/<method> — forward all of those straight to
+    # the actual telegram-bot-api process running internally.
+    location /bot {
+      proxy_pass http://127.0.0.1:8081;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+    }
+
+    # Everything else is treated as a raw file path. In --local mode,
+    # getFile returns an absolute path like
+    # /var/lib/telegram-bot-api/<bot_id>/documents/x.jpg — our Node code
+    # strips that known prefix and requests the remainder here, which
+    # nginx serves straight off the same disk telegram-bot-api wrote to.
+    location / {
+      root /var/lib/telegram-bot-api;
+      autoindex off;
+    }
+  }
+}
