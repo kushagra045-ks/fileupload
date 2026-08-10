@@ -206,14 +206,29 @@ function startTelegramBot({ s3, bucket, maxFileMB, io, getRoomMeta, saveRoomMeta
     });
   });
 
-  // bot.launch() is async and rejects if it can't reach apiRoot (wrong
-  // URL, bot-api service down, etc). Without a .catch here, that becomes
-  // an unhandled rejection that crashes the ENTIRE Node process — taking
-  // the whole website down over what should only be a bot-feature outage.
-  bot.launch().catch((e) => {
-    console.error('Telegram bot failed to start (site keeps running without it):', e.message);
-  });
-  console.log('Telegram bot connecting via local API server at', apiRoot);
+  // bot.launch() rejects if it can't reach apiRoot right now (bot-api
+  // service asleep, still waking up, briefly unreachable, etc). A single
+  // failed attempt used to mean the bot stayed dead until the whole main
+  // service was manually restarted — this retries with backoff instead,
+  // so it recovers on its own once the bot-api service is reachable again.
+  let launchAttempt = 0;
+  function tryLaunch() {
+    launchAttempt++;
+    console.log(`Telegram bot connecting via local API server at ${apiRoot} (attempt ${launchAttempt})`);
+    bot.launch()
+      .then(() => {
+        console.log('Telegram bot connected.');
+      })
+      .catch((e) => {
+        const delayMs = Math.min(60000, 5000 * launchAttempt); // ramps up to 1 min between tries
+        console.error(
+          `Telegram bot failed to start (attempt ${launchAttempt}, retrying in ${Math.round(delayMs / 1000)}s):`,
+          e.message
+        );
+        setTimeout(tryLaunch, delayMs);
+      });
+  }
+  tryLaunch();
 
   process.once('SIGINT', () => bot.stop('SIGINT'));
   process.once('SIGTERM', () => bot.stop('SIGTERM'));
