@@ -145,8 +145,8 @@ function startTelegramBot({ s3, bucket, maxFileMB, io, getRoomMeta, saveRoomMeta
         const meta = await pullFileIntoRoom(fileId, name, mimeType, code, (bytes) => {
           updateStatus(`Pulling that in\u2026 ${(bytes / (1024 * 1024)).toFixed(0)}MB so far`);
         });
-        const link2 = siteUrl ? `\n${siteUrl}/#/room/${code}` : '';
-        return updateStatus(`Done \u2014 "${meta.name}" is live on ${code}${link2}`);
+        const link2 = siteUrl ? `\n${siteUrl}\nEnter code: ${code}` : '';
+        return updateStatus(`Done — "${meta.name}" is live${link2}`);
       } catch (e) {
         lastError = e;
         // Node wraps most network failures as a generic "fetch failed" —
