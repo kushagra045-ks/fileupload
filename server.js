@@ -109,9 +109,21 @@ async function saveRoomMeta(code, list) {
 }
 
 function contentDisposition(name) {
+  // Keeps your safe ASCII fallback strategy for the standard filename parameter
   const fallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'");
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  
+  // Encodes everything, then manually fixes the characters encodeURIComponent skips
+  const strictEncoded = encodeURIComponent(name)
+    .replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${strictEncoded}`;
 }
+
+
+// function contentDisposition(name) {
+//   const fallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'");
+//   return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+// }
 
 // ---------- automatic expiry sweep ----------
 async function cleanupExpired() {
