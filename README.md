@@ -97,10 +97,43 @@ a second tab/browser to see files sync live between them.
 | `S3_ACCESS_KEY_ID` | —     | Required.                                                    |
 | `S3_SECRET_ACCESS_KEY` | — | Required.                                                    |
 | `S3_BUCKET_NAME` | —       | Required.                                                    |
+| `CF_WORKER_PROXY_URL` | —  | Optional. See "Free egress via a Cloudflare Worker" below.   |
 
 The frontend reads `MAX_FILE_MB` and `FILE_TTL_HOURS` from the backend
 automatically at `/api/config` — no need to duplicate them anywhere in
 `public/`.
+
+## Free egress via a Cloudflare Worker (optional, no card required)
+
+Backblaze B2's free tier includes only **1GB of downloads per day**. A single
+file over 1GB (or a handful of smaller ones) can blow past that immediately,
+after which B2 either throttles you or starts billing $0.01/GB.
+
+Backblaze and Cloudflare are both members of the **Bandwidth Alliance**, so
+traffic from B2 to Cloudflare is free. This repo includes a small Cloudflare
+Worker (`cloudflare-proxy-worker/worker.js`) that proxies downloads through
+that free path instead of redirecting the browser straight to B2 — with no
+credit card needed on either side (Cloudflare accounts and the Workers Free
+plan, 100,000 requests/day, don't require one).
+
+**Setup:**
+1. Sign up at cloudflare.com — free, no card.
+2. **Workers & Pages → Create → deploy a Worker**, and paste in the contents
+   of `cloudflare-proxy-worker/worker.js` (or run `wrangler deploy` from that
+   folder if you have the CLI).
+3. Cloudflare gives you a URL like
+   `https://wavelength-download-proxy.<your-subdomain>.workers.dev`.
+4. Set `CF_WORKER_PROXY_URL` to that URL on your Wavelength service (Render
+   env vars) and redeploy.
+
+Downloads now flow browser → Worker → B2 instead of browser → B2 directly.
+Leave `CF_WORKER_PROXY_URL` unset and nothing changes — downloads redirect
+straight to the signed URL exactly as before.
+
+The Worker only proxies requests to storage-provider hostnames on its
+allow-list (`worker.js`), so it can't be abused as an open proxy for
+arbitrary URLs. It also forwards `Range` headers, so video/audio scrubbing
+and resumed downloads keep working through the proxy.
 
 ## Deploying on Render (or any Node host)
 
@@ -244,6 +277,9 @@ wavelength/
   server.js          Express API + Socket.io + object storage
   telegramBot.js     optional: Telegram bot integration (see setup above)
   telegram-bot-api-docker/   custom image: bot-api + nginx on one port (see setup above)
+  cloudflare-proxy-worker/   optional: free-egress download proxy (see setup above)
+    worker.js                 the Worker script
+    wrangler.toml              CLI deploy config
   public/
     index.html        page shell
     style.css          all styling

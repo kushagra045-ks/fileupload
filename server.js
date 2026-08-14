@@ -28,6 +28,15 @@ const MAX_FILE_MB = Number(process.env.MAX_FILE_MB || 4096);
 // the README).
 const FILE_TTL_HOURS = Number(process.env.FILE_TTL_HOURS || 1);
 
+// Optional: route downloads through a Cloudflare Worker that proxies the
+// signed URL, so B2 egress goes through the free Bandwidth Alliance path
+// instead of billing/capping against your B2 account directly. Leave unset
+// to fall back to redirecting straight to the storage provider (original
+// behavior). See README "Free egress via Cloudflare Worker" section.
+const CF_WORKER_PROXY_URL = process.env.CF_WORKER_PROXY_URL
+  ? process.env.CF_WORKER_PROXY_URL.replace(/\/$/, '')
+  : null;
+
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || '*')
   .split(',')
   .map(s => s.trim())
@@ -269,7 +278,16 @@ app.get('/api/rooms/:code/files/:id/download', validateCode, async (req, res) =>
       Key: meta.storageKey,
       ResponseContentDisposition: contentDisposition(meta.name)
     }), { expiresIn: 300 });
-    res.redirect(url);
+
+    // If CF_WORKER_PROXY_URL is set, route the download through a Cloudflare
+    // Worker instead of straight to the storage provider. The B2 -> Cloudflare
+    // hop is free under the Bandwidth Alliance, and Workers never charge for
+    // bandwidth out to the browser — so this avoids B2's 1GB/day free-download
+    // cap entirely, with no card required on either side. See README.
+    const target = CF_WORKER_PROXY_URL
+      ? `${CF_WORKER_PROXY_URL}?url=${encodeURIComponent(url)}`
+      : url;
+    res.redirect(target);
   } catch (e) {
     console.error(e);
     res.status(500).send('Could not generate a download link.');
