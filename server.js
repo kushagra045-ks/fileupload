@@ -33,9 +33,25 @@ const FILE_TTL_HOURS = Number(process.env.FILE_TTL_HOURS || 1);
 // instead of billing/capping against your B2 account directly. Leave unset
 // to fall back to redirecting straight to the storage provider (original
 // behavior). See README "Free egress via Cloudflare Worker" section.
-const CF_WORKER_PROXY_URL = process.env.CF_WORKER_PROXY_URL
-  ? process.env.CF_WORKER_PROXY_URL.replace(/\/$/, '')
-  : null;
+let CF_WORKER_PROXY_URL = null;
+if (process.env.CF_WORKER_PROXY_URL) {
+  const raw = process.env.CF_WORKER_PROXY_URL.trim().replace(/\/$/, '');
+  // A value without a scheme (e.g. "my-worker.workers.dev" instead of
+  // "https://my-worker.workers.dev") makes res.redirect() emit a relative
+  // Location header — the browser then navigates to a path on YOUR OWN
+  // site instead of the Worker, which hits the SPA catch-all route and
+  // looks like "the page just refreshes and asks for the room code again".
+  // Fail fast here instead of letting that happen silently.
+  if (!/^https?:\/\//i.test(raw)) {
+    console.error(
+      `CF_WORKER_PROXY_URL is set to "${raw}" but is missing "https://" — ` +
+      `this would silently break downloads (relative-redirect loop back to ` +
+      `this server). Fix it to e.g. "https://${raw}" and redeploy.`
+    );
+    process.exit(1);
+  }
+  CF_WORKER_PROXY_URL = raw;
+}
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || '*')
   .split(',')
@@ -168,7 +184,16 @@ server.headersTimeout = 0;
 const io = new Server(server, { cors: { origin: corsOriginCheck } });
 
 app.use(cors({ origin: corsOriginCheck }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    // Never cache the HTML shell itself — every load should get whatever
+    // app.js currently ships, so a stale cached index.html/app.js pairing
+    // (e.g. right after a deploy) can't mismatch and break routing.
+    if (filePath.endsWith('index.html')) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  }
+}));
 
 // ---------- upload handling: streams straight into the bucket, never touches disk ----------
 class ObjectStorage {
@@ -314,6 +339,7 @@ app.delete('/api/rooms/:code/files/:id', validateCode, async (req, res) => {
 
 // fallback to the SPA shell for any other route
 app.get('*', (req, res) => {
+  res.set('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 

@@ -237,4 +237,3 @@ function startTelegramBot({ s3, bucket, maxFileMB, io, getRoomMeta, saveRoomMeta
 }
 
 module.exports = { startTelegramBot };
-

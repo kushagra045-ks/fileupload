@@ -82,12 +82,44 @@
   }
 
   window.addEventListener('hashchange', route);
-  route();
 
   function route() {
-    const code = currentCode();
-    if (code) renderRoom(code);
-    else renderLanding();
+    try {
+      const code = currentCode();
+      if (code) renderRoom(code);
+      else renderLanding();
+    } catch (e) {
+      console.error('Route render failed:', e);
+      showFatalError(e);
+    }
+  }
+
+  // Safety net: if something throws outside route()'s own try/catch (e.g.
+  // during an async callback), don't leave the screen black — show what
+  // broke and offer a way back, instead of a silent dead page.
+  window.addEventListener('error', (e) => {
+    if (!app.innerHTML.trim()) showFatalError(e.error || e.message);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    if (!app.innerHTML.trim()) showFatalError(e.reason);
+  });
+
+  function showFatalError(err) {
+    const message = (err && err.message) ? err.message : String(err || 'Unknown error');
+    app.innerHTML = `
+      <div class="landing">
+        <div class="wordmark">WAVELENGTH</div>
+        <h1 class="headline">Something went wrong loading this page.</h1>
+        <p class="sub">${escapeHtml(message)}</p>
+        <button class="btn btn-primary" id="fatalReload">Reload</button>
+        <div class="divider-row">OR</div>
+        <button class="btn btn-ghost" id="fatalHome">Back to start</button>
+      </div>
+    `;
+    const reloadBtn = document.getElementById('fatalReload');
+    if (reloadBtn) reloadBtn.addEventListener('click', () => location.reload());
+    const homeBtn = document.getElementById('fatalHome');
+    if (homeBtn) homeBtn.addEventListener('click', () => { location.hash = ''; location.reload(); });
   }
 
   // ---------------- landing ----------------
@@ -271,6 +303,14 @@
   }
 
   function connectSocket(code) {
+    if (typeof io !== 'function') {
+      console.error('socket.io client failed to load — check /socket.io/socket.io.js is reachable.');
+      setSignal(false);
+      const text = document.getElementById('signalText');
+      if (text) text.textContent = 'OFFLINE';
+      showToast('Live updates unavailable — reload the page to retry', true);
+      return;
+    }
     socket = io(API_BASE || undefined, { transports: ['websocket', 'polling'] });
     socket.on('connect', () => {
       setSignal(true);
@@ -426,4 +466,10 @@
     };
     xhr.send(formData);
   }
+
+  // Kick off the initial render now that every const/function above
+  // (including roomState) has been declared — calling this any earlier
+  // throws a temporal-dead-zone ReferenceError whenever the page loads
+  // directly on a #/room/xxxx URL, since renderRoom() touches roomState.
+  route();
 })();
