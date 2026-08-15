@@ -45,6 +45,16 @@
     return String(Math.floor(1000 + Math.random() * 9000));
   }
 
+  // Remembers the most recently visited room locally (this device only,
+  // never sent to the server) so returning users get a one-tap "rejoin"
+  // instead of retyping the code every time.
+  function getLastRoom() {
+    try { return localStorage.getItem('wavelength:lastRoom'); } catch (e) { return null; }
+  }
+  function setLastRoom(code) {
+    try { localStorage.setItem('wavelength:lastRoom', code); } catch (e) { /* private browsing etc — fine to skip */ }
+  }
+
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
@@ -86,8 +96,10 @@
   function route() {
     try {
       const code = currentCode();
-      if (code) renderRoom(code);
-      else renderLanding();
+      if (code) { renderRoom(code); return; }
+      const malformed = location.hash.startsWith('#/room/');
+      if (malformed) history.replaceState(null, '', location.pathname + location.search);
+      renderLanding(malformed ? 'That room link looks invalid — codes are 4 digits.' : null);
     } catch (e) {
       console.error('Route render failed:', e);
       showFatalError(e);
@@ -123,8 +135,9 @@
   }
 
   // ---------------- landing ----------------
-  function renderLanding() {
+  function renderLanding(notice) {
     if (socket) { socket.disconnect(); socket = null; }
+    document.title = 'Wavelength';
 
     app.innerHTML = `
       <div class="landing">
@@ -150,6 +163,7 @@
         </div>
         <h1 class="headline">Tune into a frequency,<br>drop your files.</h1>
         <p class="sub">Pick a 4-digit channel. Anyone with the code sees every file the moment it lands, no accounts, no folders.</p>
+        ${notice ? `<div class="error-msg">${escapeHtml(notice)}</div>` : ''}
 
         <div class="code-entry" id="codeEntry">
           ${[0, 1, 2, 3].map(i => `<input class="code-digit" id="d${i}" inputmode="numeric" maxlength="1" autocomplete="off">`).join('')}
@@ -159,6 +173,7 @@
 
         <div class="divider-row">OR</div>
         <button class="btn btn-ghost" id="newBtn">Start a new frequency</button>
+        ${getLastRoom() ? `<button class="btn btn-ghost" id="rejoinBtn">Rejoin ${getLastRoom()}</button>` : ''}
       </div>
     `;
 
@@ -202,6 +217,11 @@
     document.getElementById('newBtn').addEventListener('click', () => {
       location.hash = '#/room/' + genCode();
     });
+
+    const rejoinBtn = document.getElementById('rejoinBtn');
+    if (rejoinBtn) {
+      rejoinBtn.addEventListener('click', () => { location.hash = '#/room/' + getLastRoom(); });
+    }
   }
 
   // ---------------- room ----------------
@@ -209,6 +229,8 @@
 
   function renderRoom(code) {
     if (socket) { socket.disconnect(); socket = null; }
+    document.title = 'Room ' + code + ' · Wavelength';
+    setLastRoom(code);
     if (roomState.tickTimer) { clearInterval(roomState.tickTimer); roomState.tickTimer = null; }
     roomState.code = code;
     roomState.files = [];
@@ -425,44 +447,52 @@
       if (!files.length) return;
     }
 
-    const formData = new FormData();
-    files.forEach(f => formData.append('files', f, f.name));
+    // One request per file (uploaded in parallel) rather than one request
+    // for the whole batch — that way each file gets its own accurate
+    // progress bar and its own success/failure toast, instead of every
+    // file in a drop sharing one combined percentage.
+    files.forEach(uploadSingleFile);
+  }
 
-    const tempEntries = files.map(f => ({ tempId: Math.random().toString(36).slice(2), name: f.name, type: f.type, progress: 0 }));
-    roomState.uploading.push(...tempEntries);
+  function uploadSingleFile(file) {
+    const tempEntry = { tempId: Math.random().toString(36).slice(2), name: file.name, type: file.type, progress: 0 };
+    roomState.uploading.push(tempEntry);
     renderFileList();
+
+    const formData = new FormData();
+    formData.append('files', file, file.name);
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', API_BASE + '/api/rooms/' + roomState.code + '/upload');
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;
-      const pct = Math.round((e.loaded / e.total) * 100);
-      tempEntries.forEach(t => t.progress = pct);
+      tempEntry.progress = Math.round((e.loaded / e.total) * 100);
       renderFileList();
     };
     xhr.onload = () => {
-      roomState.uploading = roomState.uploading.filter(u => !tempEntries.includes(u));
+      roomState.uploading = roomState.uploading.filter(u => u !== tempEntry);
       if (xhr.status >= 200 && xhr.status < 300) {
-        const data = JSON.parse(xhr.responseText);
+        let data;
+        try { data = JSON.parse(xhr.responseText); } catch (e) { data = {}; }
         roomState.files = roomState.files.concat(
           (data.files || []).filter(f => !roomState.files.some(existing => existing.id === f.id))
         );
         renderFileList();
-        showToast(files.length === 1 ? '"' + files[0].name + '" is on the air' : files.length + ' files are on the air');
+        showToast('"' + file.name + '" is on the air');
       } else {
         renderFileList();
         try {
           const err = JSON.parse(xhr.responseText);
-          showToast(err.error || 'Upload failed', true);
+          showToast(err.error || ('"' + file.name + '" failed to upload'), true);
         } catch (e) {
-          showToast('Upload failed', true);
+          showToast('"' + file.name + '" failed to upload', true);
         }
       }
     };
     xhr.onerror = () => {
-      roomState.uploading = roomState.uploading.filter(u => !tempEntries.includes(u));
+      roomState.uploading = roomState.uploading.filter(u => u !== tempEntry);
       renderFileList();
-      showToast('Upload failed — check the server is reachable', true);
+      showToast('"' + file.name + '" failed — check the server is reachable', true);
     };
     xhr.send(formData);
   }
