@@ -132,10 +132,17 @@ async function saveRoomMeta(code, list) {
     ContentType: 'application/json'
   }));
 }
+//const strictEncoded = encodeURIComponent(name)
+   // .replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
 
+//  return `attachment; filename="${fallback}"; filename*=UTF-8''${strictEncoded}`;
 function contentDisposition(name) {
   const fallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'");
-  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+const strictEncoded = encodeURIComponent(name)
+    .replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${strictEncoded}`;
+  //return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
 // ---------- automatic expiry sweep ----------
