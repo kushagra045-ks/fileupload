@@ -136,8 +136,12 @@ async function saveRoomMeta(code, list) {
 
 //  return `attachment; filename="${fallback}"; filename*=UTF-8''${strictEncoded}`;
 function contentDisposition(name) {
+<<<<<<< HEAD
 const fallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'");
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+=======
+  const fallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'");
+>>>>>>> 82f928353e54aabca2d59efa590b844b48722852
 const strictEncoded = encodeURIComponent(name)
     .replace(/['()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
 
