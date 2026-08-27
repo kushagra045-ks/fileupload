@@ -319,10 +319,41 @@ the `Content-Disposition` header.
   affects the file list — never deletes the actual stored files). Fine for
   a hobby-scale app; a real database removes this edge case entirely if you
   outgrow it.
-- Uploads still stream **through your server** on their way to storage (not
-  buffered in memory — streamed in small chunks — but the bytes do pass
-  through). Downloads bypass the server entirely via signed URLs. If upload
-  bandwidth ever becomes the bottleneck at scale, the next step is
-  presigned direct-to-storage uploads from the browser, which removes the
-  server from the upload path too — a bigger change, ask if you want it
-  built out.
+- **Uploads go straight from the browser to storage via a presigned URL** —
+  the file bytes never pass through your server at all, the same way
+  downloads already worked. Your server only ever sees two small JSON
+  requests per file (asking for the URL, then confirming the upload
+  landed), so your host's own bandwidth allowance is barely touched no
+  matter how much traffic the app gets. This matters a lot on Render's
+  current free "Hobby" plan, whose bandwidth allowance is only 5GB/month —
+  easy to blow through in a day or two if uploads relayed through the
+  server, and the reason a free-tier Wavelength deploy can get suspended
+  for bandwidth even with very light use. The Telegram bot path is
+  unaffected — it always uploaded server-to-server directly, not through
+  the browser.
+
+## One extra setup step: allow the bucket to accept browser uploads (CORS)
+
+Because uploads now go straight from the browser to the bucket, the bucket
+itself has to explicitly allow that — otherwise the browser's PUT request
+gets blocked before your file ever arrives, even though your server-issued
+URL was valid.
+
+Run the included script once, from your own machine, with your bucket's
+credentials and your site's real URL:
+
+```bash
+S3_ENDPOINT=https://s3.us-west-004.backblazeb2.com \
+S3_REGION=us-west-004 \
+S3_ACCESS_KEY_ID=... \
+S3_SECRET_ACCESS_KEY=... \
+S3_BUCKET_NAME=wavelength-yourname-files \
+ALLOWED_ORIGIN=https://your-wavelength-site.onrender.com \
+node scripts/setup-cors.js
+```
+
+Include `http://localhost:3000` in `ALLOWED_ORIGIN` (comma-separated) too if
+you also test uploads while running the app locally. Re-run the script any
+time you add a new domain (e.g. a custom domain) that should be allowed to
+upload. You only need to do this once per bucket — it's not something the
+app itself does on every startup.

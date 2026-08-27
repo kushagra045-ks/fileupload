@@ -459,42 +459,66 @@
     roomState.uploading.push(tempEntry);
     renderFileList();
 
-    const formData = new FormData();
-    formData.append('files', file, file.name);
+    function fail(msg) {
+      roomState.uploading = roomState.uploading.filter(u => u !== tempEntry);
+      renderFileList();
+      showToast(msg, true);
+    }
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', API_BASE + '/api/rooms/' + roomState.code + '/upload');
-    xhr.upload.onprogress = (e) => {
-      if (!e.lengthComputable) return;
-      tempEntry.progress = Math.round((e.loaded / e.total) * 100);
-      renderFileList();
-    };
-    xhr.onload = () => {
-      roomState.uploading = roomState.uploading.filter(u => u !== tempEntry);
-      if (xhr.status >= 200 && xhr.status < 300) {
-        let data;
-        try { data = JSON.parse(xhr.responseText); } catch (e) { data = {}; }
-        roomState.files = roomState.files.concat(
-          (data.files || []).filter(f => !roomState.files.some(existing => existing.id === f.id))
+    // Step 1: ask the server for a presigned URL, then PUT the file bytes
+    // straight to storage (the file never passes through this server —
+    // that's the whole point, since Render's free bandwidth is tiny).
+    fetch(API_BASE + '/api/rooms/' + roomState.code + '/upload-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: file.name, size: file.size, contentType: file.type || 'application/octet-stream' })
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Could not start upload.');
+        return data;
+      })
+      .then(({ id, storageKey, uploadUrl }) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', uploadUrl);
+        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+        xhr.upload.onprogress = (e) => {
+          if (!e.lengthComputable) return;
+          tempEntry.progress = Math.round((e.loaded / e.total) * 100);
+          renderFileList();
+        };
+        xhr.onload = () => {
+          if (xhr.status < 200 || xhr.status >= 300) {
+            return fail('"' + file.name + '" failed to upload to storage.');
+          }
+          // Step 2: tell the server the upload landed, so it can register
+          // the file in the room's (tiny) JSON metadata and notify everyone.
+          fetch(API_BASE + '/api/rooms/' + roomState.code + '/upload-complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, storageKey, name: file.name, type: file.type || 'application/octet-stream' })
+          })
+            .then(async (res) => {
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok) throw new Error(data.error || 'Upload finished but could not be registered.');
+              return data;
+            })
+            .then((data) => {
+              roomState.uploading = roomState.uploading.filter(u => u !== tempEntry);
+              roomState.files = roomState.files.concat(
+                (data.files || []).filter(f => !roomState.files.some(existing => existing.id === f.id))
+              );
+              renderFileList();
+              showToast('"' + file.name + '" is on the air');
+            })
+            .catch((e) => fail(e.message || ('"' + file.name + '" failed to upload')));
+        };
+        xhr.onerror = () => fail(
+          '"' + file.name + '" failed — check your connection and that the storage bucket allows uploads from this site (CORS).'
         );
-        renderFileList();
-        showToast('"' + file.name + '" is on the air');
-      } else {
-        renderFileList();
-        try {
-          const err = JSON.parse(xhr.responseText);
-          showToast(err.error || ('"' + file.name + '" failed to upload'), true);
-        } catch (e) {
-          showToast('"' + file.name + '" failed to upload', true);
-        }
-      }
-    };
-    xhr.onerror = () => {
-      roomState.uploading = roomState.uploading.filter(u => u !== tempEntry);
-      renderFileList();
-      showToast('"' + file.name + '" failed — check the server is reachable', true);
-    };
-    xhr.send(formData);
+        xhr.send(file);
+      })
+      .catch((e) => fail(e.message || ('"' + file.name + '" failed to upload')));
   }
 
   // Kick off the initial render now that every const/function above
